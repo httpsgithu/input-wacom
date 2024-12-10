@@ -1,0 +1,75 @@
+---
+name: "tagged-release"
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  tagged-release:
+    name: "Tagged Release"
+    runs-on: "ubuntu-latest"
+    permissions:
+      contents: write
+
+    steps:
+      # ...
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-tags: 'true'
+          fetch-depth: 0
+
+      - name: "Make Step"
+        run: |
+          ./autogen.sh
+          make dist
+          echo "done!"
+
+      - name: Get tar file
+        id: get-tar-name
+        run: echo "fileName=$(find . -type f -iname "*.tar.bz2" -printf "%f\n")" >> $GITHUB_OUTPUT
+
+      - name: Get shortlog
+        id: get-shortlog
+        run: |
+          {
+            echo 'shortlog<<EOFEOFEOF'
+            git shortlog $(git describe --abbrev=0 HEAD^)..HEAD | sed -E 's/^([^ ].*)$/**\1**/; s/^ + / - /'
+            echo
+            echo EOFEOFEOF
+          } >> $GITHUB_OUTPUT
+
+      - name: Generate Checksums
+        id: generate-checksums
+        run : |
+          md5sum *tar.bz2 | tee md5sum.txt
+          sha1sum *tar.bz2 | tee sha1sum.txt
+          sha256sum *tar.bz2 | tee sha256sum.txt
+          echo "md5=$(cut -f1 -d' ' md5sum.txt)" >> $GITHUB_OUTPUT
+          echo "sha1=$(cut -f1 -d' ' sha1sum.txt)" >> $GITHUB_OUTPUT
+          echo "sha256=$(cut -f1 -d' ' sha256sum.txt)" >> $GITHUB_OUTPUT
+
+      - name: Upload Release Asset
+        id: upload-main-asset
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: ${{ steps.get-tar-name.outputs.fileName }}
+          generate_release_notes: false
+          body: |
+            Commit description goes here.
+
+            ## Commits
+            ${{ steps.get-shortlog.outputs.shortlog }}
+
+            ## Release
+            **git tag: ${{  github.ref_name }}**
+            ${{ steps.upload-main-asset.outputs.browser_download_url }}
+            md5: `${{ steps.generate-checksums.outputs.md5 }}`
+            sha1: `${{ steps.generate-checksums.outputs.sha1 }}`
+            sha256: `${{ steps.generate-checksums.outputs.sha256 }}`
