@@ -1,8 +1,14 @@
-on: [ pull_request ]
+on:
+  pull_request:
+    paths:
+    - '4.18/**'
+
+permissions:
+  contents: read
 
 jobs:
   checkpatch:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout the repo
         uses: actions/checkout@v1

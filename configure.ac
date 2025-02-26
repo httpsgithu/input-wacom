@@ -1,6 +1,6 @@
 AC_PREREQ(2.60)
 AC_INIT([input-wacom],
-	[0.48.0])
+	[1.4.0])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_HEADERS([config.h])
@@ -117,17 +117,6 @@ package and try again.])
 fi
 WCM_ENV_KERNEL="yes"
 
-dnl Check for RedHat entreprise Linux >= 7.4
-AC_MSG_CHECKING(RHEL7 minor release)
-RHEL7_RELEASE=[$(sed -n 's/^\(Red Hat Enterprise\|Scientific\|CentOS\) Linux .*release 7.\([0-9]*\).*$/\2/gp' "/etc/redhat-release" 2> /dev/null | head -n1)]
-dnl RHEL7_RELEASE=""
-if test "$RHEL7_RELEASE" = ""; then
-	RHEL7_RELEASE="0"
-elif test "$RHEL7_RELEASE" -gt "3"; then
-	RHEL7_RELEASE="4"
-fi
-AC_MSG_RESULT([$RHEL7_RELEASE])
-
 dnl
 dnl # code taken from https://github.com/zfsonlinux/spl/blob/master/config/spl-build.m4
 dnl # licensed under GPL-v2.0
@@ -156,6 +145,8 @@ $2
   ;
   return 0;
 }
+#include "linux/module.h"
+MODULE_LICENSE("GPL");
 ])
 
 dnl #
@@ -168,7 +159,7 @@ AC_DEFUN([WACOM_LINUX_COMPILE_IFELSE], [
 	modpost_flag=''
 	test "x$enable_linux_builtin" = xyes && modpost_flag='modpost=true' # fake modpost stage
 	AS_IF(
-		[AC_TRY_COMMAND(cp conftest.c .autoconf/build && make [$2] -C $WCM_KERNEL_DIR EXTRA_CFLAGS="-fno-pie -Werror-implicit-function-declaration" M=$PWD/.autoconf/build $modpost_flag) >/dev/null && AC_TRY_COMMAND([$3])],
+		[AC_TRY_COMMAND(cp conftest.c .autoconf/build && make [$2] -C $WCM_KERNEL_DIR EXTRA_CFLAGS="-fno-pie -Werror-implicit-function-declaration" KBUILD_MODPOST_WARN=1 M=$PWD/.autoconf/build $modpost_flag) >/dev/null && AC_TRY_COMMAND([$3])],
 		[$4],
 		[_AC_MSG_LOG_CONFTEST m4_ifvaln([$5],[$5])]
 	)
@@ -186,43 +177,127 @@ AC_DEFUN([WACOM_LINUX_TRY_COMPILE],
 	[$3], [$4])
 ])
 
-dnl
-dnl # end of copy from ZFS/spl
-dnl
-
-dnl RedHat entreprise Linux 7.5 backports powersupply functions from 4.1
-AC_MSG_CHECKING(power supply version)
+dnl Check which API is available for determining bus type
+AC_MSG_CHECKING(hid_is_using_ll_driver)
 WACOM_LINUX_TRY_COMPILE([
-#include <linux/power_supply.h>
+#include <linux/hid.h>
+bool hid_is_using_ll_driver(struct hid_device *hdev, struct hid_ll_driver *driver) { return 0; }
 ],[
-struct power_supply_desc test;
 ],[
-	HAVE_POWERSUPPLY_41=yes
-	AC_MSG_RESULT([v4.1+])
-	AC_DEFINE([WACOM_POWERSUPPLY_41], [], [kernel uses powersupply from v4.1+])
+	HAVE_IS_USING_LL_DRIVER=no
+	AC_MSG_RESULT([no])
 ],[
-	HAVE_POWERSUPPLY_41=no
-	AC_MSG_RESULT([pre-v4.1])
+	HAVE_IS_USING_LL_DRIVER=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_USING_LL_DRIVER], [], [kernel defines hid_is_using_ll_driver from v4.14+])
 ])
+AC_MSG_CHECKING(hid_is_usb)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/hid.h>
+bool hid_is_usb(struct hid_device *hdev) { return 0; }
+],[
+],[
+	HAVE_HID_IS_USB=no
+	AC_MSG_RESULT([no])
+],[
+	HAVE_HID_IS_USB=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_HID_IS_USB], [], [kernel defines hid_is_usb from v5.15+])
+])
+
+dnl Check which API style the I2C subsystem uses for probing.
+dnl The old-style was deprecated in Linux 4.10 and a "probe_new" function
+dnl introduced during the transition. The old-style was removed and
+dnl "probe_new" renamed in Linux 6.3.
+AC_MSG_CHECKING(legacy I2C probe API)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/i2c.h>
+int probe_legacy(struct i2c_client *client, const struct i2c_device_id *id);
+],[
+struct i2c_driver test = { .probe = probe_legacy };
+],[
+	HAVE_I2C_PROBE_LEGACY=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_PROBE_LEGACY], [], [legacy .probe removed in v6.3 and later])
+],[
+	HAVE_I2C_PROBE_LEGACY=no
+	AC_MSG_RESULT([no])
+])
+
+dnl Check if input_set_timestamp is available to us or not. This should
+dnl be available in Linux 5.4.0 and later.
+AC_MSG_CHECKING(input_set_timestamp)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/input.h>
+bool input_set_timestamp(struct input_dev *dev, ktime_t timestamp) { return true; }
+],[
+],[
+	HAVE_INPUT_SET_TIMESTAMP=no
+	AC_MSG_RESULT([no])
+],[
+	HAVE_INPUT_SET_TIMESTAMP=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_INPUT_SET_TIMESTAMP], [], [kernel defines input_set_timestamp from v5.4+])
+])
+
+dnl Check if resolution_multiplier is available to us or not. This should
+dnl be available in Linux 5.0.0 and later.
+AC_MSG_CHECKING(resolution_multiplier)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/hid.h>
+int test(struct hid_usage *usage) { return usage->resolution_multiplier; }
+],[
+],[
+	HAVE_RESOLUTION_MULTIPLIER=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_RESOLUTION_MULTIPLIER], [], [kernel defines resolution_multiplier from v5.0+])
+],[
+	HAVE_RESOLUTION_MULTIPLIER=no
+	AC_MSG_RESULT([no])
+])
+
+dnl Check if LED triggers define brightness. This should be in Linux
+dnl 6.10 and later.
+AC_MSG_CHECKING(trigger brightness)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/leds.h>
+int test(struct led_trigger *trigger) { return trigger->brightness; }
+],[
+],[
+	HAVE_TRIGGER_BRIGHTNESS=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_TRIGGER_BRIGHTNESS], [], [kernel defines trigger brightness from v6.10+])
+],[
+	HAVE_TRIGGER_BRIGHTNESS=no
+	AC_MSG_RESULT([no])
+])
+
+dnl Check if unaligned.h has been moved to linux/. This should be in Linux
+dnl 6.12 and later.
+AC_MSG_CHECKING(for linux/unaligned.h)
+WACOM_LINUX_TRY_COMPILE([
+#include <linux/unaligned.h>
+],[
+],[
+	HAVE_LINUX_UNALIGNED=yes
+	AC_MSG_RESULT([yes])
+	AC_DEFINE([WACOM_LINUX_UNALIGNED], [], [kernel defines linux/unaligned.h v6.12+])
+],[
+	HAVE_LINUX_UNALIGNED=no
+	AC_MSG_RESULT([no])
+])
+
+
 
 dnl Check which version of the driver we should compile
 AC_DEFUN([WCM_EXPLODE], [$(echo "$1" | awk '{split($[0],x,"[[^0-9]]"); printf("%03d%03d%03d\n",x[[1]],x[[2]],x[[3]]);}')])
 EXPLODED_VER="WCM_EXPLODE($MODUTS)"
-if test "$EXPLODED_VER" -lt "WCM_EXPLODE(3.7)"; then
-	AC_MSG_ERROR(m4_normalize([Kernels older than 3.7 are no longer supported by input-wacom.
+if test "$EXPLODED_VER" -lt "WCM_EXPLODE(4.18)"; then
+	AC_MSG_ERROR(m4_normalize([Kernels older than 4.18 are no longer supported by input-wacom.
 		 For newer Wacom models, please upgrade your system to a newer kernel.
-		 For old Wacom models, 'input-wacom-0.47.0' may still support the device]))
-elif test "$EXPLODED_VER" -lt "WCM_EXPLODE(3.17)"; then
-	WCM_KERNEL_VER="3.7"
-elif test "$EXPLODED_VER" -lt "WCM_EXPLODE(4.5)"; then
-	WCM_KERNEL_VER="3.17"
+		 For old Wacom models, 'input-wacom-1.2.0' may still support the device]))
 else
-	WCM_KERNEL_VER="4.5"
-fi
-
-dnl Build both legacy and hid versions
-if test "$RHEL7_RELEASE" -ge "4"; then
-        WCM_KERNEL_VER+=" 3.17"
+	WCM_KERNEL_VER="4.18"
 fi
 
 dnl =======================================================
@@ -371,17 +446,13 @@ echo
 WCM_SRC_SUBDIRS=". $WCM_KERNEL_VER"
 AC_SUBST(WCM_KERNEL_DIR)
 AC_SUBST(WCM_KERNEL_VER)
-AC_SUBST(RHEL6_RELEASE)
-AC_SUBST(RHEL7_RELEASE)
 AC_SUBST(MODUTS)
 AC_SUBST(MODSIGN_HASHALGO)
 AC_SUBST(MODSIGN_PRIVFILE)
 AC_SUBST(MODSIGN_CERTFILE)
 
 AC_CONFIG_FILES([Makefile
-                 3.7/Makefile
-                 3.17/Makefile
-                 4.5/Makefile])
+                 4.18/Makefile])
 AC_OUTPUT
 
 AC_MSG_NOTICE([
